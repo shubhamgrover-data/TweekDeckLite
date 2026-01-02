@@ -1,0 +1,5 @@
+{
+  "name": "TweetDeck Lite",
+  "description": "A streamlined, card-based Twitter feed reader that allows users to manage followed accounts and view their latest tweets in a clean interface.",
+  "requestFramePermissions": []
+}
