@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Tweet } from '../types';
-import { Heart, MessageCircle, Repeat, Share, BarChart2, ExternalLink } from 'lucide-react';
+import { Heart, MessageCircle, Repeat, BarChart2, ExternalLink, ChevronLeft, ChevronRight, PlayCircle } from 'lucide-react';
 
 interface TweetCardProps {
   tweet: Tweet;
@@ -25,7 +25,60 @@ const formatDate = (dateString: string): string => {
 };
 
 export const TweetCard: React.FC<TweetCardProps> = ({ tweet }) => {
+  const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
   const tweetUrl = `https://x.com/${tweet.author.username}/status/${tweet.id}`;
+
+  const hasMedia = tweet.media && tweet.media.length > 0;
+  
+  const handlePrevMedia = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!tweet.media) return;
+    setCurrentMediaIndex((prev) => (prev - 1 + tweet.media!.length) % tweet.media!.length);
+  };
+
+  const handleNextMedia = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (!tweet.media) return;
+    setCurrentMediaIndex((prev) => (prev + 1) % tweet.media!.length);
+  };
+
+  const renderMediaItem = (media: { type: 'image' | 'video'; url: string }) => {
+    const isVideo = media.type === 'video';
+    
+    // Check if URL looks like a video file
+    const isVideoFile = media.url.includes('.mp4') || media.url.includes('.m3u8');
+
+    if (isVideo && isVideoFile) {
+        return (
+            <video 
+                src={media.url} 
+                controls 
+                className="w-full h-full object-contain bg-black"
+                preload="metadata"
+            >
+                Your browser does not support the video tag.
+            </video>
+        );
+    }
+
+    return (
+        <div className="relative w-full h-full">
+            <img 
+                src={media.url} 
+                alt="Tweet media" 
+                className={`w-full h-full object-cover ${isVideo ? 'brightness-75' : ''}`}
+                loading="lazy"
+            />
+            {isVideo && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                    <div className="bg-black/50 rounded-full p-3 backdrop-blur-sm text-white">
+                        <PlayCircle size={48} fill="currentColor" className="text-white opacity-90" />
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+  };
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-4 hover:bg-slate-50 transition-colors duration-200 mb-4 shadow-sm relative group">
@@ -70,60 +123,80 @@ export const TweetCard: React.FC<TweetCardProps> = ({ tweet }) => {
           </div>
 
           {/* Text */}
-          <p className="text-slate-800 whitespace-pre-wrap mb-3 text-[15px] leading-relaxed">
+          <p className="text-slate-800 whitespace-pre-wrap mb-3 text-[15px] leading-relaxed break-words">
             {tweet.text}
           </p>
 
-          {/* Media */}
-          {tweet.media && tweet.media.length > 0 && (
-            <div className="mb-3 rounded-xl overflow-hidden border border-slate-200">
-              {tweet.media[0].type === 'image' && (
-                <img 
-                  src={tweet.media[0].url} 
-                  alt="Tweet media" 
-                  className="w-full h-auto object-cover max-h-[400px]"
-                  loading="lazy"
-                />
+          {/* Media Carousel */}
+          {hasMedia && tweet.media && (
+            <div className="mb-3 rounded-xl overflow-hidden border border-slate-200 bg-slate-900 relative group/media aspect-[16/9] sm:aspect-[2/1] md:aspect-[16/9]">
+              {/* Media Content */}
+              <div className="w-full h-full flex items-center justify-center">
+                  {renderMediaItem(tweet.media[currentMediaIndex])}
+              </div>
+
+              {/* Navigation Controls (only if > 1 item) */}
+              {tweet.media.length > 1 && (
+                <>
+                  {/* Prev Button */}
+                  <button 
+                    onClick={handlePrevMedia}
+                    className="absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-all opacity-0 group-hover/media:opacity-100 backdrop-blur-sm z-10"
+                    aria-label="Previous image"
+                  >
+                    <ChevronLeft size={20} />
+                  </button>
+
+                  {/* Next Button */}
+                  <button 
+                    onClick={handleNextMedia}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full bg-black/50 text-white hover:bg-black/70 transition-all opacity-0 group-hover/media:opacity-100 backdrop-blur-sm z-10"
+                    aria-label="Next image"
+                  >
+                    <ChevronRight size={20} />
+                  </button>
+
+                  {/* Indicators */}
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 flex gap-1.5 z-10">
+                    {tweet.media.map((_, idx) => (
+                      <button
+                        key={idx}
+                        onClick={(e) => {
+                            e.preventDefault();
+                            setCurrentMediaIndex(idx);
+                        }}
+                        className={`w-1.5 h-1.5 rounded-full transition-all shadow-sm ${idx === currentMediaIndex ? 'bg-white scale-125' : 'bg-white/50 hover:bg-white/80'}`}
+                      />
+                    ))}
+                  </div>
+
+                  {/* Counter */}
+                  <div className="absolute top-3 right-3 px-2 py-1 bg-black/60 text-white text-xs font-medium rounded-md backdrop-blur-md z-10">
+                    {currentMediaIndex + 1} / {tweet.media.length}
+                  </div>
+                </>
               )}
-               {tweet.media[0].type === 'video' && (
-                 <div className="bg-black flex items-center justify-center h-64 text-slate-500 text-sm">
-                    Video content (preview not available)
-                 </div>
-               )}
             </div>
           )}
 
-          {/* Stats / Action Bar */}
-          <div className="flex justify-between items-center text-slate-500 max-w-md mt-2">
-            <button className="flex items-center gap-1.5 group/btn hover:text-blue-500 transition-colors">
-              <div className="p-2 rounded-full group-hover/btn:bg-blue-50 transition-colors">
-                <MessageCircle size={18} />
-              </div>
+          {/* Stats (Informational only) */}
+          <div className="flex justify-between items-center text-slate-500 max-w-sm mt-3 pt-2">
+            <div className="flex items-center gap-2" title="Replies">
+              <MessageCircle size={18} className="text-slate-400" />
               <span className="text-xs font-medium">{formatNumber(tweet.stats.replies)}</span>
-            </button>
-            <button className="flex items-center gap-1.5 group/btn hover:text-green-500 transition-colors">
-              <div className="p-2 rounded-full group-hover/btn:bg-green-50 transition-colors">
-                <Repeat size={18} />
-              </div>
+            </div>
+            <div className="flex items-center gap-2" title="Retweets">
+              <Repeat size={18} className="text-slate-400" />
               <span className="text-xs font-medium">{formatNumber(tweet.stats.retweets)}</span>
-            </button>
-            <button className="flex items-center gap-1.5 group/btn hover:text-pink-500 transition-colors">
-              <div className="p-2 rounded-full group-hover/btn:bg-pink-50 transition-colors">
-                <Heart size={18} />
-              </div>
+            </div>
+            <div className="flex items-center gap-2" title="Likes">
+              <Heart size={18} className="text-slate-400" />
               <span className="text-xs font-medium">{formatNumber(tweet.stats.likes)}</span>
-            </button>
-            <button className="flex items-center gap-1.5 group/btn hover:text-blue-500 transition-colors">
-               <div className="p-2 rounded-full group-hover/btn:bg-blue-50 transition-colors">
-                <BarChart2 size={18} />
-              </div>
+            </div>
+            <div className="flex items-center gap-2" title="Views">
+              <BarChart2 size={18} className="text-slate-400" />
               <span className="text-xs font-medium">{formatNumber(tweet.stats.views)}</span>
-            </button>
-            <button className="flex items-center gap-1.5 group/btn hover:text-blue-500 transition-colors">
-               <div className="p-2 rounded-full group-hover/btn:bg-blue-50 transition-colors">
-                <Share size={18} />
-              </div>
-            </button>
+            </div>
           </div>
         </div>
       </div>

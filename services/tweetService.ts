@@ -42,22 +42,27 @@ const getRestId = async (username: string): Promise<string> => {
   }
 };
 
+interface FetchTweetsResponse {
+  tweets: Tweet[];
+  nextCursor?: string;
+}
+
 /**
  * Fetches tweets for a specific username using the 2-step process.
  * Step 1: Get ID from username.
  * Step 2: Get Timeline from ID (using the flat JSON structure).
  */
-export const fetchTweetsForUser = async (username: string): Promise<Tweet[]> => {
+export const fetchTweetsForUser = async (username: string, cursor?: string): Promise<FetchTweetsResponse> => {
   try {
-    // Step 1: Get the numeric REST ID
-    //const userId = await getRestId(username);
-    const usernameLC = username.toLowerCase();
-    // Step 2: Fetch the Timeline using the REST ID
+    // Step 1: Get the numeric REST ID (Skipped as per user request to use screenname directly with timeline.php)
+    
+    // Step 2: Fetch the Timeline using the screenname
     const config = {
       method: 'GET',
-      url: `https://twitter-api45.p.rapidapi.com/timeline.php?screenname=${username}`,
+      url: `https://${API_HOST}/timeline.php`,
       params: {
-        screename: username
+        screenname: username,
+        cursor: cursor
       },
       headers: {
         'x-rapidapi-key': API_KEY,
@@ -67,26 +72,57 @@ export const fetchTweetsForUser = async (username: string): Promise<Tweet[]> => 
 
     const response = await axios.request(config);
     const data = response.data;
-    console.log(data)
+    console.log(data);
+
     // Validate based on new flat structure: { timeline: [...] }
     if (!data || !data.timeline || !Array.isArray(data.timeline)) {
         // If the array is empty or missing, return empty
         console.warn('API response missing timeline array', data);
-        return [];
+        return { tweets: [] };
     }
 
     const tweets: Tweet[] = data.timeline.map((item: any) => {
-        // Map fields based on the provided screenshot
+        // Handle media based on different API response structures
+        let formattedMedia: { type: 'image' | 'video'; url: string }[] = [];
+
+        if (item.media) {
+            // Case 1: Media is an object with photo/video arrays (as seen in screenshot)
+            if (item.media.photo && Array.isArray(item.media.photo)) {
+                item.media.photo.forEach((p: any) => {
+                    formattedMedia.push({
+                        type: 'image',
+                        url: p.media_url_https || p.url
+                    });
+                });
+            }
+            if (item.media.video && Array.isArray(item.media.video)) {
+                item.media.video.forEach((v: any) => {
+                    formattedMedia.push({
+                        type: 'video',
+                        url: v.media_url_https || v.url
+                    });
+                });
+            }
+            
+            // Case 2: Media is directly an array (Legacy/RapidAPI specific)
+            if (Array.isArray(item.media)) {
+                item.media.forEach((m: any) => {
+                     formattedMedia.push({
+                        type: m.type === 'video' ? 'video' : 'image',
+                        url: m.url || m.media_url_https || m.media_url
+                     });
+                 });
+            }
+        }
         
-        // Handle media
-        // Screenshot shows media: [], so we iterate if it exists.
-        // Assuming media objects have 'type' and 'url' or 'media_url_https'
-        let formattedMedia = undefined;
-        if (item.media && Array.isArray(item.media) && item.media.length > 0) {
-            formattedMedia = item.media.map((m: any) => ({
-                type: m.type === 'video' ? 'video' : 'image',
-                url: m.url || m.media_url_https || m.media_url
-            }));
+        // Case 3: Fallback to entities.media if root media is empty
+        if (formattedMedia.length === 0 && item.entities?.media && Array.isArray(item.entities.media)) {
+             item.entities.media.forEach((m: any) => {
+                 formattedMedia.push({
+                     type: m.type === 'video' ? 'video' : 'image',
+                     url: m.media_url_https || m.url
+                 });
+             });
         }
 
         return {
@@ -104,12 +140,17 @@ export const fetchTweetsForUser = async (username: string): Promise<Tweet[]> => 
                 replies: item.replies || 0,
                 views: item.views ? parseInt(item.views, 10) : 0
             },
-            media: formattedMedia
+            media: formattedMedia.length > 0 ? formattedMedia : undefined
         };
     });
 
-    // Sort by date (newest first) - though usually API returns them sorted
-    return tweets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    // Sort by date (newest first)
+    const sortedTweets = tweets.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+    return {
+        tweets: sortedTweets,
+        nextCursor: data.next_cursor || data.cursor?.next
+    };
 
   } catch (error: any) {
     console.error("Failed to fetch tweets:", error);

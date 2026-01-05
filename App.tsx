@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Settings, RefreshCw, Bird, ChevronDown, UserPlus, AlertCircle, AlertTriangle } from 'lucide-react';
+import { Settings, RefreshCw, Bird, ChevronDown, UserPlus, AlertCircle, AlertTriangle, ArrowDown } from 'lucide-react';
 import { Tweet } from './types';
 import { fetchTweetsForUser } from './services/tweetService';
 import { TweetCard } from './components/TweetCard';
@@ -11,23 +11,42 @@ const DEFAULT_ACCOUNTS = ['SahilKapoor',  'OpenAI', 'SpaceX'];
 const App: React.FC = () => {
   // --- State ---
   const [accounts, setAccounts] = useState<string[]>(() => {
-    const saved = localStorage.getItem('twitter_accounts');
-    return saved ? JSON.parse(saved) : DEFAULT_ACCOUNTS;
+    try {
+      const saved = localStorage.getItem('twitter_accounts');
+      return saved ? JSON.parse(saved) : DEFAULT_ACCOUNTS;
+    } catch (error) {
+      console.error('Failed to parse twitter_accounts from localStorage:', error);
+      return DEFAULT_ACCOUNTS;
+    }
   });
 
   const [selectedAccount, setSelectedAccount] = useState<string>(() => {
-    const saved = localStorage.getItem('last_selected_account');
-    // If saved account exists in current accounts list, use it, else use first one
-    if (saved) {
-      const savedAccounts = localStorage.getItem('twitter_accounts');
-      const currentList = savedAccounts ? JSON.parse(savedAccounts) : DEFAULT_ACCOUNTS;
-      if (currentList.includes(saved)) return saved;
+    // Derive the initial accounts list again to ensure selectedAccount fallback is valid relative to the actual list
+    let currentAccounts = DEFAULT_ACCOUNTS;
+    try {
+        const savedAccounts = localStorage.getItem('twitter_accounts');
+        if (savedAccounts) {
+            currentAccounts = JSON.parse(savedAccounts);
+        }
+    } catch (error) {
+        console.error('Failed to parse twitter_accounts for selection initialization:', error);
     }
-    return DEFAULT_ACCOUNTS[0];
+
+    const savedSelection = localStorage.getItem('last_selected_account');
+    
+    // If we have a saved selection and it exists in our current list, use it
+    if (savedSelection && currentAccounts.includes(savedSelection)) {
+      return savedSelection;
+    }
+    
+    // Otherwise fallback to the first account of the ACTUAL list (not necessarily the default list)
+    return currentAccounts.length > 0 ? currentAccounts[0] : '';
   });
 
   const [tweets, setTweets] = useState<Tweet[]>([]);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -44,26 +63,56 @@ const App: React.FC = () => {
   }, [selectedAccount]);
 
   // --- Data Fetching ---
-  const loadTweets = useCallback(async (username: string) => {
+  const loadTweets = useCallback(async (username: string, cursor?: string) => {
     if (!username) return;
     
-    setIsLoading(true);
+    const isPagination = !!cursor;
+
+    if (isPagination) {
+        setIsLoadingMore(true);
+    } else {
+        setIsLoading(true);
+        setTweets([]); // Clear current tweets while loading initial set
+    }
+    
     setError(null);
-    setTweets([]); // Clear current tweets while loading to show transition
     
     try {
-      const data = await fetchTweetsForUser(username);
-      if (data.length === 0) {
-          // This isn't an error thrown by service, but a logical empty state
-          // We don't set error here, handled by UI empty state
+      const { tweets: newTweets, nextCursor: newCursor } = await fetchTweetsForUser(username, cursor);
+      
+      setTweets(prev => {
+          if (isPagination) {
+              // Deduplicate based on ID just in case
+              const existingIds = new Set(prev.map(t => t.id));
+              const uniqueNewTweets = newTweets.filter(t => !existingIds.has(t.id));
+              return [...prev, ...uniqueNewTweets];
+          }
+          return newTweets;
+      });
+
+      setNextCursor(newCursor || null);
+      
+      if (!isPagination) {
+        setLastRefreshed(new Date());
       }
-      setTweets(data);
-      setLastRefreshed(new Date());
+
     } catch (err: any) {
       console.error("App: Failed to fetch tweets", err);
-      setError(err.message || "An unexpected error occurred while fetching tweets.");
+      // Only show main error banner if it's the initial load. 
+      // For pagination, we might want a different UX, but for now using same error state
+      // or maybe just log it if we don't want to break the whole view.
+      if (!isPagination) {
+          setError(err.message || "An unexpected error occurred while fetching tweets.");
+      } else {
+          // Could create a separate 'paginationError' state, but for simplicity:
+           alert("Failed to load more tweets: " + (err.message || "Unknown error"));
+      }
     } finally {
-      setIsLoading(false);
+      if (isPagination) {
+          setIsLoadingMore(false);
+      } else {
+          setIsLoading(false);
+      }
     }
   }, []);
 
@@ -90,8 +139,15 @@ const App: React.FC = () => {
       setSelectedAccount(newAccounts.length > 0 ? newAccounts[0] : '');
       if (newAccounts.length === 0) {
         setTweets([]);
+        setNextCursor(null);
       }
     }
+  };
+
+  const handleLoadMore = () => {
+      if (nextCursor && !isLoadingMore) {
+          loadTweets(selectedAccount, nextCursor);
+      }
   };
 
   return (
@@ -205,7 +261,7 @@ const App: React.FC = () => {
             </div>
           )}
 
-          {/* Loading State Skeleton */}
+          {/* Loading State Skeleton (Initial Load) */}
           {isLoading && (
             <>
               {[1, 2, 3].map((i) => (
@@ -226,7 +282,7 @@ const App: React.FC = () => {
           )}
 
           {/* Tweet List */}
-          {!isLoading && tweets.length > 0 && (
+          {tweets.length > 0 && (
             <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
               {tweets.map(tweet => (
                 <TweetCard key={tweet.id} tweet={tweet} />
@@ -247,13 +303,28 @@ const App: React.FC = () => {
             </div>
           )}
           
-          {/* End of Feed */}
+          {/* Footer: Load More or End of Feed */}
           {!isLoading && !error && tweets.length > 0 && (
-             <div className="py-8 text-center">
-              <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-200/50 rounded-full text-sm text-slate-500">
-                <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-                You're all caught up
-              </div>
+            <div className="py-6 text-center">
+                {isLoadingMore ? (
+                    <div className="flex items-center justify-center gap-2 text-slate-500">
+                        <RefreshCw size={20} className="animate-spin" />
+                        <span className="text-sm font-medium">Loading more tweets...</span>
+                    </div>
+                ) : nextCursor ? (
+                    <button 
+                        onClick={handleLoadMore}
+                        className="group flex items-center justify-center gap-2 mx-auto px-6 py-2.5 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-full font-medium transition-all shadow-sm hover:shadow-md active:scale-95"
+                    >
+                        <span>Load More</span>
+                        <ArrowDown size={18} className="transition-transform group-hover:translate-y-0.5" />
+                    </button>
+                ) : (
+                    <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-200/50 rounded-full text-sm text-slate-500">
+                        <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
+                        You're all caught up
+                    </div>
+                )}
             </div>
           )}
 
