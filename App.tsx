@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Settings, RefreshCw, Bird, ChevronDown, UserPlus, AlertCircle, AlertTriangle, ArrowDown } from 'lucide-react';
-import { Tweet } from './types';
+import { Settings, RefreshCw, Bird, ChevronDown, UserPlus, AlertCircle, AlertTriangle, ArrowDown, Sparkles } from 'lucide-react';
+import { Tweet, Message } from './types';
 import { fetchTweetsForUser } from './services/tweetService';
 import { TweetCard } from './components/TweetCard';
 import { AccountSettingsModal } from './components/AccountSettingsModal';
+import { AIAssistantPanel } from './components/AIAssistantPanel';
+import { DEFAULT_SUMMARY_PROMPT } from './services/llmService';
 
 // Included the user's test account 'BotChrome114342'
 const DEFAULT_ACCOUNTS = ['SahilKapoor',  'OpenAI', 'SpaceX'];
@@ -43,11 +45,25 @@ const App: React.FC = () => {
     return currentAccounts.length > 0 ? currentAccounts[0] : '';
   });
 
+  // --- Caching State ---
+  const [tweetCache, setTweetCache] = useState<Record<string, { tweets: Tweet[], nextCursor: string | null, lastRefreshed: Date }>>({});
+  const [aiCache, setAiCache] = useState<Record<string, { messages: Message[], hasSummarized: boolean }>>({});
+
+  // --- Prompt State ---
+  const [customPrompt, setCustomPrompt] = useState<string>(() => {
+    return localStorage.getItem('ai_custom_prompt') || DEFAULT_SUMMARY_PROMPT;
+  });
+
+  useEffect(() => {
+    localStorage.setItem('ai_custom_prompt', customPrompt);
+  }, [customPrompt]);
+
   const [tweets, setTweets] = useState<Tweet[]>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isLoadingMore, setIsLoadingMore] = useState<boolean>(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
+  const [isAIPanelOpen, setIsAIPanelOpen] = useState<boolean>(false);
   const [lastRefreshed, setLastRefreshed] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -63,10 +79,20 @@ const App: React.FC = () => {
   }, [selectedAccount]);
 
   // --- Data Fetching ---
-  const loadTweets = useCallback(async (username: string, cursor?: string) => {
+  const loadTweets = useCallback(async (username: string, cursor?: string, forceRefresh = false) => {
     if (!username) return;
     
     const isPagination = !!cursor;
+
+    // Check Cache first (if not paginating and not forcing refresh)
+    if (!isPagination && !forceRefresh && tweetCache[username]) {
+        console.log(`Loading tweets for ${username} from cache`);
+        setTweets(tweetCache[username].tweets);
+        setNextCursor(tweetCache[username].nextCursor);
+        setLastRefreshed(tweetCache[username].lastRefreshed);
+        setError(null);
+        return;
+    }
 
     if (isPagination) {
         setIsLoadingMore(true);
@@ -85,26 +111,43 @@ const App: React.FC = () => {
               // Deduplicate based on ID just in case
               const existingIds = new Set(prev.map(t => t.id));
               const uniqueNewTweets = newTweets.filter(t => !existingIds.has(t.id));
-              return [...prev, ...uniqueNewTweets];
+              const updatedList = [...prev, ...uniqueNewTweets];
+              
+              // Update Cache with new pagination data
+              setTweetCache(cache => ({
+                  ...cache,
+                  [username]: {
+                      tweets: updatedList,
+                      nextCursor: newCursor || null,
+                      lastRefreshed: cache[username]?.lastRefreshed || new Date()
+                  }
+              }));
+
+              return updatedList;
           }
+          
+          // Initial Load - Set Cache
+          const refreshedDate = new Date();
+          setTweetCache(cache => ({
+              ...cache,
+              [username]: {
+                  tweets: newTweets,
+                  nextCursor: newCursor || null,
+                  lastRefreshed: refreshedDate
+              }
+          }));
+          setLastRefreshed(refreshedDate);
+          
           return newTweets;
       });
 
       setNextCursor(newCursor || null);
-      
-      if (!isPagination) {
-        setLastRefreshed(new Date());
-      }
 
     } catch (err: any) {
       console.error("App: Failed to fetch tweets", err);
-      // Only show main error banner if it's the initial load. 
-      // For pagination, we might want a different UX, but for now using same error state
-      // or maybe just log it if we don't want to break the whole view.
       if (!isPagination) {
           setError(err.message || "An unexpected error occurred while fetching tweets.");
       } else {
-          // Could create a separate 'paginationError' state, but for simplicity:
            alert("Failed to load more tweets: " + (err.message || "Unknown error"));
       }
     } finally {
@@ -114,7 +157,7 @@ const App: React.FC = () => {
           setIsLoading(false);
       }
     }
-  }, []);
+  }, [tweetCache]); // Added tweetCache to dep array to ensure we read latest
 
   // Initial load or when selection changes
   useEffect(() => {
@@ -134,6 +177,18 @@ const App: React.FC = () => {
     const newAccounts = accounts.filter(a => a !== username);
     setAccounts(newAccounts);
     
+    // Clear cache for removed user
+    setTweetCache(prev => {
+        const copy = { ...prev };
+        delete copy[username];
+        return copy;
+    });
+    setAiCache(prev => {
+        const copy = { ...prev };
+        delete copy[username];
+        return copy;
+    });
+    
     if (selectedAccount === username) {
       // If we removed the currently selected account, select the first available, or empty
       setSelectedAccount(newAccounts.length > 0 ? newAccounts[0] : '');
@@ -150,11 +205,24 @@ const App: React.FC = () => {
       }
   };
 
+  const toggleAIPanel = () => {
+    setIsAIPanelOpen(!isAIPanelOpen);
+  };
+
+  const handleAICacheUpdate = useCallback((messages: Message[], hasSummarized: boolean) => {
+      if (selectedAccount) {
+          setAiCache(prev => ({
+              ...prev,
+              [selectedAccount]: { messages, hasSummarized }
+          }));
+      }
+  }, [selectedAccount]);
+
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col">
       {/* --- Sticky Header --- */}
       <header className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200 shadow-sm">
-        <div className="max-w-2xl mx-auto px-4 h-16 flex items-center justify-between">
+        <div className={`mx-auto px-4 h-16 flex items-center justify-between transition-all duration-300 ${isAIPanelOpen ? 'max-w-7xl' : 'max-w-2xl'}`}>
           
           {/* Logo */}
           <div className="flex items-center gap-2 text-blue-500">
@@ -189,7 +257,15 @@ const App: React.FC = () => {
           {/* Controls */}
           <div className="flex items-center gap-2">
             <button 
-              onClick={() => loadTweets(selectedAccount)}
+              onClick={toggleAIPanel}
+              className={`p-2 rounded-full transition-all flex items-center gap-1 ${isAIPanelOpen ? 'bg-blue-100 text-blue-600' : 'text-slate-500 hover:bg-slate-100'}`}
+              title="AI Assistant"
+            >
+              <Sparkles size={20} className={isAIPanelOpen ? "fill-blue-600/20" : ""} />
+            </button>
+            <div className="w-px h-6 bg-slate-200 mx-1"></div>
+            <button 
+              onClick={() => loadTweets(selectedAccount, undefined, true)}
               disabled={isLoading || !selectedAccount}
               className="p-2 text-slate-500 hover:bg-slate-100 rounded-full transition-colors disabled:opacity-50"
               title="Refresh Feed"
@@ -208,127 +284,144 @@ const App: React.FC = () => {
       </header>
 
       {/* --- Main Content --- */}
-      <main className="flex-1 max-w-2xl w-full mx-auto p-4">
+      <main className={`flex-1 w-full mx-auto px-4 py-4 flex flex-col lg:flex-row gap-6 transition-all duration-300 ${isAIPanelOpen ? 'max-w-7xl' : 'max-w-2xl'}`}>
         
-        {/* Status Bar */}
-        <div className="flex justify-between items-center mb-6 px-1">
-          <h2 className="text-lg font-bold text-slate-800">
-            {selectedAccount ? `Tweets from @${selectedAccount}` : 'Feed'}
-          </h2>
-          {lastRefreshed && !isLoading && !error && (
-            <span className="text-xs text-slate-400 font-medium">
-              Updated {lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-            </span>
-          )}
-        </div>
+        {/* Tweet Feed Column */}
+        <div className="flex-1 min-w-0 transition-all">
+          {/* Status Bar */}
+          <div className="flex justify-between items-center mb-6 px-1">
+            <h2 className="text-lg font-bold text-slate-800">
+              {selectedAccount ? `Tweets from @${selectedAccount}` : 'Feed'}
+            </h2>
+            {lastRefreshed && !isLoading && !error && (
+              <span className="text-xs text-slate-400 font-medium">
+                Updated {lastRefreshed.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+              </span>
+            )}
+          </div>
 
-        {/* Content Area */}
-        <div className="space-y-4">
-          
-          {/* Error Banner */}
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex gap-3 text-red-800 mb-4 animate-in fade-in slide-in-from-top-2">
-              <AlertTriangle className="flex-shrink-0" size={24} />
-              <div>
-                <h3 className="font-semibold text-sm">Failed to load tweets</h3>
-                <p className="text-sm mt-1 opacity-90">{error}</p>
+          {/* Content Area */}
+          <div className="space-y-4">
+            
+            {/* Error Banner */}
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-4 flex gap-3 text-red-800 mb-4 animate-in fade-in slide-in-from-top-2">
+                <AlertTriangle className="flex-shrink-0" size={24} />
+                <div>
+                  <h3 className="font-semibold text-sm">Failed to load tweets</h3>
+                  <p className="text-sm mt-1 opacity-90">{error}</p>
+                  <button 
+                      onClick={() => loadTweets(selectedAccount, undefined, true)}
+                      className="text-xs font-bold mt-2 hover:underline"
+                  >
+                      Try Again
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Empty State: No Accounts */}
+            {accounts.length === 0 && !error && (
+              <div className="flex flex-col items-center justify-center py-20 bg-white rounded-2xl border border-dashed border-slate-300 text-center px-6">
+                <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mb-4">
+                  <UserPlus size={32} />
+                </div>
+                <h3 className="text-xl font-bold text-slate-800 mb-2">Welcome to TweetDeck Lite</h3>
+                <p className="text-slate-500 max-w-sm mb-6">
+                  Start by adding your favorite Twitter accounts to create your personalized feed.
+                </p>
                 <button 
-                    onClick={() => loadTweets(selectedAccount)}
-                    className="text-xs font-bold mt-2 hover:underline"
+                  onClick={() => setIsSettingsOpen(true)}
+                  className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2.5 rounded-full font-medium transition-all shadow-lg shadow-blue-500/30"
                 >
-                    Try Again
+                  Add Your First Account
                 </button>
               </div>
-            </div>
-          )}
+            )}
 
-          {/* Empty State: No Accounts */}
-          {accounts.length === 0 && !error && (
-            <div className="flex flex-col items-center justify-center py-20 bg-white rounded-2xl border border-dashed border-slate-300 text-center px-6">
-              <div className="w-16 h-16 bg-blue-50 text-blue-500 rounded-full flex items-center justify-center mb-4">
-                <UserPlus size={32} />
-              </div>
-              <h3 className="text-xl font-bold text-slate-800 mb-2">Welcome to TweetDeck Lite</h3>
-              <p className="text-slate-500 max-w-sm mb-6">
-                Start by adding your favorite Twitter accounts to create your personalized feed.
-              </p>
-              <button 
-                onClick={() => setIsSettingsOpen(true)}
-                className="bg-blue-500 hover:bg-blue-600 text-white px-6 py-2.5 rounded-full font-medium transition-all shadow-lg shadow-blue-500/30"
-              >
-                Add Your First Account
-              </button>
-            </div>
-          )}
-
-          {/* Loading State Skeleton (Initial Load) */}
-          {isLoading && (
-            <>
-              {[1, 2, 3].map((i) => (
-                <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm animate-pulse">
-                  <div className="flex gap-3">
-                    <div className="w-12 h-12 bg-slate-200 rounded-full"></div>
-                    <div className="flex-1 space-y-3 py-1">
-                      <div className="h-4 bg-slate-200 rounded w-1/3"></div>
-                      <div className="space-y-2">
-                        <div className="h-3 bg-slate-200 rounded"></div>
-                        <div className="h-3 bg-slate-200 rounded w-5/6"></div>
+            {/* Loading State Skeleton (Initial Load) */}
+            {isLoading && (
+              <>
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm animate-pulse">
+                    <div className="flex gap-3">
+                      <div className="w-12 h-12 bg-slate-200 rounded-full"></div>
+                      <div className="flex-1 space-y-3 py-1">
+                        <div className="h-4 bg-slate-200 rounded w-1/3"></div>
+                        <div className="space-y-2">
+                          <div className="h-3 bg-slate-200 rounded"></div>
+                          <div className="h-3 bg-slate-200 rounded w-5/6"></div>
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              ))}
-            </>
-          )}
+                ))}
+              </>
+            )}
 
-          {/* Tweet List */}
-          {tweets.length > 0 && (
-            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-              {tweets.map(tweet => (
-                <TweetCard key={tweet.id} tweet={tweet} />
-              ))}
-            </div>
-          )}
-
-          {/* Empty State: No Tweets Found (Logic Empty) */}
-          {!isLoading && !error && accounts.length > 0 && tweets.length === 0 && (
-            <div className="py-16 text-center">
-              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 text-slate-400 mb-3">
-                <AlertCircle size={24} />
+            {/* Tweet List */}
+            {tweets.length > 0 && (
+              <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                {tweets.map(tweet => (
+                  <TweetCard key={tweet.id} tweet={tweet} />
+                ))}
               </div>
-              <p className="text-slate-500 font-medium">No tweets found for @{selectedAccount}</p>
-              <p className="text-slate-400 text-sm mt-1">
-                 This user might have no recent tweets, or the API response format has changed.
-              </p>
-            </div>
-          )}
-          
-          {/* Footer: Load More or End of Feed */}
-          {!isLoading && !error && tweets.length > 0 && (
-            <div className="py-6 text-center">
-                {isLoadingMore ? (
-                    <div className="flex items-center justify-center gap-2 text-slate-500">
-                        <RefreshCw size={20} className="animate-spin" />
-                        <span className="text-sm font-medium">Loading more tweets...</span>
-                    </div>
-                ) : nextCursor ? (
-                    <button 
-                        onClick={handleLoadMore}
-                        className="group flex items-center justify-center gap-2 mx-auto px-6 py-2.5 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-full font-medium transition-all shadow-sm hover:shadow-md active:scale-95"
-                    >
-                        <span>Load More</span>
-                        <ArrowDown size={18} className="transition-transform group-hover:translate-y-0.5" />
-                    </button>
-                ) : (
-                    <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-200/50 rounded-full text-sm text-slate-500">
-                        <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
-                        You're all caught up
-                    </div>
-                )}
-            </div>
-          )}
+            )}
 
+            {/* Empty State: No Tweets Found (Logic Empty) */}
+            {!isLoading && !error && accounts.length > 0 && tweets.length === 0 && (
+              <div className="py-16 text-center">
+                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-100 text-slate-400 mb-3">
+                  <AlertCircle size={24} />
+                </div>
+                <p className="text-slate-500 font-medium">No tweets found for @{selectedAccount}</p>
+                <p className="text-slate-400 text-sm mt-1">
+                   This user might have no recent tweets, or the API response format has changed.
+                </p>
+              </div>
+            )}
+            
+            {/* Footer: Load More or End of Feed */}
+            {!isLoading && !error && tweets.length > 0 && (
+              <div className="py-6 text-center">
+                  {isLoadingMore ? (
+                      <div className="flex items-center justify-center gap-2 text-slate-500">
+                          <RefreshCw size={20} className="animate-spin" />
+                          <span className="text-sm font-medium">Loading more tweets...</span>
+                      </div>
+                  ) : nextCursor ? (
+                      <button 
+                          onClick={handleLoadMore}
+                          className="group flex items-center justify-center gap-2 mx-auto px-6 py-2.5 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-full font-medium transition-all shadow-sm hover:shadow-md active:scale-95"
+                      >
+                          <span>Load More</span>
+                          <ArrowDown size={18} className="transition-transform group-hover:translate-y-0.5" />
+                      </button>
+                  ) : (
+                      <div className="inline-flex items-center gap-2 px-4 py-2 bg-slate-200/50 rounded-full text-sm text-slate-500">
+                          <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
+                          You're all caught up
+                      </div>
+                  )}
+              </div>
+            )}
+          </div>
         </div>
+
+        {/* AI Assistant Panel */}
+        {isAIPanelOpen && (
+            <AIAssistantPanel 
+                key={selectedAccount} // Important: Forces component remount when user changes
+                isOpen={isAIPanelOpen}
+                onClose={() => setIsAIPanelOpen(false)}
+                tweets={tweets}
+                username={selectedAccount}
+                initialMessages={aiCache[selectedAccount]?.messages}
+                initialHasSummarized={aiCache[selectedAccount]?.hasSummarized}
+                onCacheUpdate={handleAICacheUpdate}
+                customPrompt={customPrompt}
+            />
+        )}
       </main>
 
       {/* Settings Modal */}
@@ -338,6 +431,9 @@ const App: React.FC = () => {
         accounts={accounts}
         onAddAccount={handleAddAccount}
         onRemoveAccount={handleRemoveAccount}
+        customPrompt={customPrompt}
+        onSavePrompt={setCustomPrompt}
+        defaultPrompt={DEFAULT_SUMMARY_PROMPT}
       />
     </div>
   );

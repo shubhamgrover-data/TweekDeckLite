@@ -30,3 +30,8 @@ export interface AppState {
   tweets: Tweet[];
   error: string | null;
 }
+
+export interface Message {
+  role: 'user' | 'model';
+  text: string;
+}
